@@ -156,6 +156,87 @@ def extract_text_from_pdf(file_path):
         print(f"❌ Unexpected PDF error: {str(e)[:50]}")
         return ""
 
+def extract_contact_info(text):
+    """
+    Extract email and phone number from CV text.
+    Returns: (email: str, phone: str)
+    """
+    if not text:
+        return "", ""
+    
+    email = ""
+    phone = ""
+    
+    # Clean text - remove markdown, extra spaces, and special characters that might interfere
+    clean_text = re.sub(r'[*_]{1,3}', '', text)  # Remove markdown bold/italic
+    clean_text = re.sub(r'\s+', ' ', clean_text)  # Normalize whitespace
+    
+    # Extract Email - comprehensive pattern that handles edge cases
+    # Look for email with word boundaries and optional prefixes
+    email_pattern = r'(?:email|e-mail|gmail|mail|contact)?\s*[:\-]?\s*([a-zA-Z0-9][a-zA-Z0-9._%+-]*@[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,})'
+    
+    email_matches = re.findall(email_pattern, clean_text, re.IGNORECASE)
+    if email_matches:
+        # Filter and validate
+        valid_emails = [
+            e.strip().lower() for e in email_matches 
+            if not any(x in e.lower() for x in ['example', 'domain', 'sample', 'test', 'noreply', 'youremail'])
+            and len(e) >= 6
+            and '@' in e
+            and '.' in e.split('@')[1]  # Must have domain extension
+        ]
+        if valid_emails:
+            email = valid_emails[0]
+    
+    # Extract Phone - improved patterns with better validation
+    # First, look for common phone prefixes to get context
+    phone_patterns = [
+        r'(?:phone|mobile|cell|tel|telephone|contact|whatsapp|wa)?\s*[:\-]?\s*(\+?\d{1,4}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,9})',
+        r'(\+\d{1,4}[-.\s]?\d{9,15})',  # International with +
+        r'(0\d{9,14})',  # Starting with 0 (Egyptian format)
+        r'(\d{10,15})',  # 10-15 digits together
+    ]
+    
+    all_phone_matches = []
+    for pattern in phone_patterns:
+        matches = re.findall(pattern, clean_text, re.IGNORECASE)
+        all_phone_matches.extend([m if isinstance(m, str) else m[0] for m in matches])
+    
+    if all_phone_matches:
+        # Clean and validate each match
+        valid_phones = []
+        for p in all_phone_matches:
+            # Extract only digits and +
+            cleaned = re.sub(r'[^\d+]', '', p)
+            
+            # Smart handling of leading zeros
+            if cleaned.startswith('00'):
+                # 00 is international prefix, replace with +
+                cleaned = '+' + cleaned[2:]
+            elif cleaned.startswith('0') and len(cleaned) == 11:
+                # Egyptian mobile format: 01XXXXXXXXX (keep the 0)
+                pass  
+            elif cleaned.startswith('0') and len(cleaned) != 11:
+                # Other cases: strip leading zeros
+                cleaned = cleaned.lstrip('0')
+            
+            # Valid if 10-15 digits (with or without +)
+            digit_count = len(re.sub(r'[^\d]', '', cleaned))
+            if 10 <= digit_count <= 15:
+                valid_phones.append(cleaned)
+        
+        if valid_phones:
+            # Prioritize: 1) Numbers starting with 0 (Egyptian), 2) Longest number
+            egyptian_phones = [p for p in valid_phones if p.startswith('0')]
+            if egyptian_phones:
+                phone = max(egyptian_phones, key=lambda x: len(x))
+            else:
+                phone = max(valid_phones, key=lambda x: len(re.sub(r'[^\d]', '', x)))
+    
+    return email, phone
+
+
+
 def extract_text_from_docx(file_path):
     """Extract text from DOCX with error handling"""
     try:
@@ -284,7 +365,7 @@ def load_cvs_from_dataframe(df):
 def rank_with_gemini(cvs, job_description, api_key=None, batch_size=1):
     """
     Rank CVs using Fireworks AI with Llama 3.3 70B
-    Universal for all specialties with production error handling
+    NOW INCLUDES: Email and phone extraction
     """
     jd_text = load_job_description(job_description)
     
@@ -296,9 +377,12 @@ def rank_with_gemini(cvs, job_description, api_key=None, batch_size=1):
     if not api_key or not fw:
         print("❌ AI service unavailable")
         for c in cvs:
+            email, phone = extract_contact_info(c.get("text", ""))
             results.append({
                 "filename": c["filename"],
                 "name": c["name"],
+                "email": email,
+                "phone": phone,
                 "score": 0,
                 "reasoning": "❌ AI service unavailable",
                 "cv_link": c.get("cv_link", "")
@@ -315,6 +399,9 @@ def rank_with_gemini(cvs, job_description, api_key=None, batch_size=1):
         try:
             print(f"🔥 Analyzing CV {i+1}/{total}: {cv['name']}")
             
+            # EXTRACT CONTACT INFO FIRST
+            email, phone = extract_contact_info(cv.get("text", ""))
+            
             # VALIDATE CV
             is_valid, validation_reason, cleaned_text = validate_cv_file(cv)
             
@@ -323,6 +410,8 @@ def rank_with_gemini(cvs, job_description, api_key=None, batch_size=1):
                 results.append({
                     "filename": cv["filename"],
                     "name": cv["name"],
+                    "email": email,
+                    "phone": phone,
                     "score": 0,
                     "reasoning": f"❌ INVALID: {validation_reason}",
                     "cv_link": cv.get("cv_link", "")
@@ -332,8 +421,10 @@ def rank_with_gemini(cvs, job_description, api_key=None, batch_size=1):
             
             valid += 1
             print(f"   ✅ Valid - analyzing...")
+            print(f"   📧 Email: {email or 'Not found'}")
+            print(f"   📱 Phone: {phone or 'Not found'}")
             
-            # AI Analysis
+            # AI Analysis (existing code)
             prompt = f"""You are an expert recruiter. Analyze this CV against the job requirements.
 
 JOB REQUIREMENTS:
@@ -394,6 +485,8 @@ Respond ONLY with JSON:
                 results.append({
                     "filename": cv["filename"],
                     "name": cv["name"],
+                    "email": email,
+                    "phone": phone,
                     "score": score,
                     "reasoning": reasoning,
                     "cv_link": cv.get("cv_link", "")
@@ -405,6 +498,8 @@ Respond ONLY with JSON:
                 results.append({
                     "filename": cv["filename"],
                     "name": cv["name"],
+                    "email": email,
+                    "phone": phone,
                     "score": 0,
                     "reasoning": "❌ Analysis failed - review manually",
                     "cv_link": cv.get("cv_link", "")
@@ -413,9 +508,12 @@ Respond ONLY with JSON:
         except Exception as e:
             errors += 1
             print(f"   ❌ Error: {str(e)[:80]}")
+            email, phone = extract_contact_info(cv.get("text", ""))
             results.append({
                 "filename": cv["filename"],
                 "name": cv["name"],
+                "email": email,
+                "phone": phone,
                 "score": 0,
                 "reasoning": f"❌ Error: {str(e)[:80]}",
                 "cv_link": cv.get("cv_link", "")
@@ -512,11 +610,12 @@ def rank_with_embeddings(cvs, job_description, top_k=5):
 # Enhanced Excel Export
 # ----------------------------
 def save_results_to_excel(results_list, job_description=None, output_dir=".", output_path=None):
-    """Save ranking results to Excel with professional formatting"""
+    """Save ranking results to Excel with email and phone columns"""
     
     df_out = pd.DataFrame(results_list)
     
-    required_cols = ["name", "score", "status", "reasoning", "cv_link"]
+    # Updated required columns to include email and phone
+    required_cols = ["name", "email", "phone", "score", "status", "reasoning", "cv_link"]
     for col in required_cols:
         if col not in df_out.columns:
             df_out[col] = ""
@@ -545,9 +644,9 @@ def save_results_to_excel(results_list, job_description=None, output_dir=".", ou
     
     # Color coding
     for i in range(2, ws.max_row + 1):
-        status = ws[f"C{i}"].value
+        status = ws[f"E{i}"].value  # Status column moved to E
         try:
-            score = float(ws[f"B{i}"].value)
+            score = float(ws[f"D{i}"].value)  # Score column moved to D
         except:
             score = 0
         
@@ -561,20 +660,28 @@ def save_results_to_excel(results_list, job_description=None, output_dir=".", ou
         for cell in ws[i]:
             cell.fill = fill
         
-        # Clickable links
-        cv_link = ws[f"E{i}"].value
+        # Make email clickable
+        email = ws[f"B{i}"].value
+        if email and "@" in str(email):
+            ws[f"B{i}"].hyperlink = f"mailto:{email}"
+            ws[f"B{i}"].style = "Hyperlink"
+        
+        # Clickable CV links
+        cv_link = ws[f"G{i}"].value  # CV link column moved to G
         if cv_link and str(cv_link).startswith("http"):
-            ws[f"E{i}"].hyperlink = cv_link
-            ws[f"E{i}"].style = "Hyperlink"
+            ws[f"G{i}"].hyperlink = cv_link
+            ws[f"G{i}"].style = "Hyperlink"
     
     # Column widths
-    ws.column_dimensions['A'].width = 25
-    ws.column_dimensions['B'].width = 10
-    ws.column_dimensions['C'].width = 15
-    ws.column_dimensions['D'].width = 60
-    ws.column_dimensions['E'].width = 40
+    ws.column_dimensions['A'].width = 25  # Name
+    ws.column_dimensions['B'].width = 30  # Email
+    ws.column_dimensions['C'].width = 20  # Phone
+    ws.column_dimensions['D'].width = 10  # Score
+    ws.column_dimensions['E'].width = 15  # Status
+    ws.column_dimensions['F'].width = 60  # Reasoning
+    ws.column_dimensions['G'].width = 40  # CV Link
     
-    # Summary Sheet
+    # Summary Sheet (existing code remains the same)
     ws_summary = wb.create_sheet("Summary")
     
     total = len(df_out)
@@ -590,8 +697,10 @@ def save_results_to_excel(results_list, job_description=None, output_dir=".", ou
     
     if top is not None:
         ws_summary["A6"], ws_summary["B6"] = "Top Candidate", top.get("name", "Unknown")
-        ws_summary["A7"], ws_summary["B7"] = "Top Score", top.get("score", 0)
-        ws_summary["A8"], ws_summary["B8"] = "CV Link", top.get("cv_link", "")
+        ws_summary["A7"], ws_summary["B7"] = "Email", top.get("email", "Not found")
+        ws_summary["A8"], ws_summary["B8"] = "Phone", top.get("phone", "Not found")
+        ws_summary["A9"], ws_summary["B9"] = "Score", top.get("score", 0)
+        ws_summary["A10"], ws_summary["B10"] = "CV Link", top.get("cv_link", "")
     
     # Generate path
     if output_path:

@@ -269,7 +269,7 @@ def _render_bulk_results_ui(results_data, excel_path):
 
     df = pd.DataFrame(results_data)
 
-    # Metrics
+    # Metrics (same as before)
     metrics = dbc.Row([
         dbc.Col(dbc.Card(dbc.CardBody([
             html.H3(f"{len(df)}", className="text-white mb-1"),
@@ -291,16 +291,33 @@ def _render_bulk_results_ui(results_data, excel_path):
         )
     ], className="mb-3")
 
-    # Table
+    # Table with email and phone columns
     table = dash_table.DataTable(
         id="results-table",
         columns=[{"name": i, "id": i} for i in df.columns],
         data=results_data,
         page_size=10,
         style_table={"overflowX": "auto"},
-        style_cell={"minWidth": "120px", "maxWidth": "250px", "whiteSpace": "normal"},
+        style_cell={
+            "minWidth": "100px", 
+            "maxWidth": "300px", 
+            "whiteSpace": "normal",
+            "textAlign": "left"
+        },
         style_header={"backgroundColor": "#f8f9fa", "fontWeight": "bold"},
-        filter_action="native", sort_action="native"
+        style_data_conditional=[
+            {
+                'if': {'column_id': 'email'},
+                'color': '#0066cc',
+                'textDecoration': 'underline'
+            },
+            {
+                'if': {'column_id': 'phone'},
+                'fontWeight': '500'
+            }
+        ],
+        filter_action="native", 
+        sort_action="native"
     )
 
     return dbc.Card([
@@ -651,11 +668,9 @@ def analyze_single_cv(n_clicks, cv_contents, cv_filename, jd_text, old_ui):
 
     if not cv_contents or not jd_text:
         return old_ui or "", old_ui
-    if not n_clicks or not cv_contents or not jd_text:
-        return "", None
 
     try:
-        from src.ranker import extract_text, rank_with_gemini
+        from src.ranker import extract_text, rank_with_gemini, extract_contact_info
 
         _, b64 = cv_contents.split(",")
         cv_bytes = base64.b64decode(b64)
@@ -664,7 +679,16 @@ def analyze_single_cv(n_clicks, cv_contents, cv_filename, jd_text, old_ui):
             f.write(cv_bytes)
 
         cv_text = extract_text(tmp_path)
-        candidate = {"filename": cv_filename, "text": cv_text, "name": cv_filename.split(".")[0], "cv_link": ""}
+        
+        # Extract contact info
+        email, phone = extract_contact_info(cv_text)
+        
+        candidate = {
+            "filename": cv_filename, 
+            "text": cv_text, 
+            "name": cv_filename.split(".")[0], 
+            "cv_link": ""
+        }
 
         results = rank_with_gemini(
             cvs=[candidate],
@@ -679,10 +703,9 @@ def analyze_single_cv(n_clicks, cv_contents, cv_filename, jd_text, old_ui):
 
         r = results[0]
         score = r["score"]
-        status = "Match" if score >= 60 else "No Match"
         reasoning = r["reasoning"]
 
-        # gauge
+        # Gauge chart
         fig = go.Figure(
             go.Indicator(
                 mode="gauge+number+delta",
@@ -703,36 +726,61 @@ def analyze_single_cv(n_clicks, cv_contents, cv_filename, jd_text, old_ui):
         )
         fig.update_layout(height=300, font={"color": "#2c3e50"})
 
+        # Card with contact info
         card = dbc.Card(
             [
-                dbc.CardHeader([html.I(className="fas fa-user-check me-2"), "CV Analysis Result"], className="bg-light"),
-                dbc.CardBody(
-                    dbc.Row(
-                        [
-                            dbc.Col(dcc.Graph(figure=fig), md=6),
-                            dbc.Col(
-                                [
-                                    html.H4("Match" if score >= 60 else "No Match", className="text-success" if score >= 60 else "text-danger"),
-                                    html.Hr(),
-                                    html.H6("Analysis Summary:", className="fw-bold"),
-                                    html.P(reasoning, className="text-muted"),
-                                    html.Hr(),
-                                    dbc.Badge(f"Score: {score}/100", color="success" if score >= 60 else "danger", className="fs-6 p-2"),
-                                ],
-                                className="d-flex flex-column justify-content-center h-100",
-                                md=6,
+                dbc.CardHeader([
+                    html.I(className="fas fa-user-check me-2"), 
+                    "CV Analysis Result"
+                ], className="bg-light"),
+                dbc.CardBody([
+                    # Contact Info Section
+                    dbc.Row([
+                        dbc.Col([
+                            html.Div([
+                                html.I(className="fas fa-envelope me-2"),
+                                html.Strong("Email: "),
+                                html.A(email or "Not found", 
+                                      href=f"mailto:{email}" if email else "#",
+                                      className="text-primary" if email else "text-muted")
+                            ], className="mb-2"),
+                            html.Div([
+                                html.I(className="fas fa-phone me-2"),
+                                html.Strong("Phone: "),
+                                html.Span(phone or "Not found", 
+                                         className="text-dark" if phone else "text-muted")
+                            ])
+                        ], md=12)
+                    ], className="mb-3"),
+                    html.Hr(),
+                    # Analysis Section
+                    dbc.Row([
+                        dbc.Col(dcc.Graph(figure=fig), md=6),
+                        dbc.Col([
+                            html.H4(
+                                "✅ Match" if score >= 60 else "❌ No Match",
+                                className="text-success" if score >= 60 else "text-danger"
                             ),
-                        ]
-                    )
-                ),
+                            html.Hr(),
+                            html.H6("Analysis Summary:", className="fw-bold"),
+                            html.P(reasoning, className="text-muted"),
+                            html.Hr(),
+                            dbc.Badge(
+                                f"Score: {score}/100",
+                                color="success" if score >= 60 else "danger",
+                                className="fs-6 p-2"
+                            ),
+                        ], className="d-flex flex-column justify-content-center h-100", md=6),
+                    ])
+                ]),
             ],
             style=custom_styles["card"],
             className="mt-4",
         )
         return card, card
+        
     except Exception as e:
         import traceback
-
         traceback.print_exc()
         return dbc.Alert(f"Error analyzing CV: {e}", color="danger"), None
 
